@@ -27,6 +27,7 @@ def parse_config(section):
     return config
 
 
+# noinspection PyMethodMayBeStatic,PyMethodMayBeStatic
 class Dataset(object):
     def __init__(self, dataset, **kwargs):
         self.config = cfg.copy()
@@ -34,7 +35,6 @@ class Dataset(object):
 
         self.config.update(parse_config('DATASETS'))
         self.config.update(kwargs)
-
 
         if 'data_root' in self.config and not os.path.isabs(dataset):
             dataset = os.path.join(self.config['data_root'], dataset)
@@ -65,9 +65,7 @@ class Dataset(object):
         :return:
         None
         """
-        command = [ self.config['rsync_cmd'], self.config['rsync_list_opts']]
-
-        command.append(self.source_location)
+        command = [self.config['rsync_cmd'], self.config['rsync_list_opts'], self.source_location]
 
         print(' '.join(command))
 
@@ -82,7 +80,7 @@ class Dataset(object):
         dirs = []
         for f in file_lines:
             item = f.split(' ')
-            if len(item) > 1: # TODO for the time being it does not do directories
+            if len(item) > 1:  # TODO for the time being it does not do directories
                 is_dir = item[0][0] == 'd'
                 if item[-1][0] == '.':
                     pass
@@ -93,15 +91,15 @@ class Dataset(object):
 
         def natural_sort_key(s, _nsre=re.compile('([0-9]+)')):
             return [int(text) if text.isdigit() else text.lower()
-            for text in re.split(_nsre, s)]
+                    for text in re.split(_nsre, s)]
+
         files.sort(key=natural_sort_key)
 
         def extension_key(s):
-            f, ext = os.path.splitext(s)
+            fp, ext = os.path.splitext(s)
             return ext
+
         files.sort(key=extension_key)
-
-
 
         print(files)
         print(dirs)
@@ -109,8 +107,7 @@ class Dataset(object):
         self.files = files
         self.dirs = dirs
 
-
-
+    # noinspection PyMethodMayBeStatic
     def make_local_copy(self):
         """
         make local copy on disk of the entire dataset
@@ -124,13 +121,14 @@ class Dataset(object):
         make hashes of files that are present in the dataset at the moment
         :return:
         """
-        pass # TODO make_file_hashes
+        pass  # TODO make_file_hashes
 
     def check_file_hashes(self):
         """
         checks
         :return:
         """
+
     def resync_to_source(self, cleanup=True):
         """
 
@@ -139,10 +137,9 @@ class Dataset(object):
         """
         pass  # TODO resync to source
 
+
 class Probe:
     pass
-
-
 
 
 class CNode(object):
@@ -152,17 +149,25 @@ class CNode(object):
         # read user defaults file
         self.config.update(parse_config('CNODE'))
         self.config.update(kwargs)
-        if dir_pattern in self.config:
-            self.base_dir = '/peones/%HOST/'.replace('%HOST', self.name)
+        self.directory = ''
+        if 'dir_pattern' in self.config:
+            self.base_dir = self.config['dir_pattern'].replace('%HOST', self.name)
+        elif 'local_dir' in self.config:
+            self.directory = self.config['local_dir']
+        else:
+            self.directory = self.base_dir
 
-        self.directory = self.base_dir
-
-    def create_temp_directory(self):
-        self.directory = tempfile.mkdtemp(dir=self.base_dir)
+    def create_temp_directory(self, dataset=None):
+        if dataset:
+            root_dir = os.path.join(self.base_dir, dataset)
+        else:
+            root_dir = self.base_dir
+        self.directory = tempfile.mkdtemp(dir=root_dir)
 
     def wipe_temp_directory(self):
         shutil.rmtree(self.directory)
-        self.directory = None
+        self.directory = ''
+
 
 class ClusterOperation:
     pass

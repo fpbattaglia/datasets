@@ -2,9 +2,12 @@
   <dictionary name="fpbatta">
     <words>
       <w>avzh</w>
+      <w>cnode</w>
       <w>dataset</w>
       <w>datasets</w>
       <w>dconf</w>
+      <w>nsre</w>
+      <w>resync</w>
       <w>rsync</w>
     </words>
   </dictionary>

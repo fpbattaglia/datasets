@@ -17,5 +17,8 @@ class TestDatasetLocalOpen(unittest.TestCase):
         c = CNode(dir_pattern='/peones/%HOST')
         self.assertEqual(c.base_dir, '/peones/Francescos-MacBook-Pro.local')
 
+    #def test_cnode_directory(self):
+
+
 if __name__ == '__main__':
     unittest.main()
