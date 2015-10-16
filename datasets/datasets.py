@@ -5,6 +5,9 @@ import re
 import socket
 import tempfile
 import shutil
+import warnings
+import hashlib
+from collections import defaultdict
 from .datasets_conf_defaults import cfg
 
 __author__ = 'fpbatta'
@@ -35,7 +38,7 @@ class Dataset(object):
 
         self.config.update(parse_config('DATASETS'))
         self.config.update(kwargs)
-
+        self.dataset = dataset
         if 'data_root' in self.config and not os.path.isabs(dataset):
             dataset = os.path.join(self.config['data_root'], dataset)
 
@@ -55,9 +58,26 @@ class Dataset(object):
         self.c_node = None
         self.local_copy_dir = None
 
-        self.files = []
+        self.all_files = []
         self.dirs = []
+        self.children = []
         self.get_list_of_files()
+
+        self.files = defaultdict(list)
+        for f in self.all_files:
+            fp, ext = os.path.splitext(f)
+            self.files[ext].append(f)
+
+        self.has_local_copy = False
+        self.hashes = {}
+
+    def assign_cnode(self, **kwargs):
+        if 'dir_pattern' in self.config:
+            kwargs['dir_pattern'] = self.config['dir_pattern']
+        if 'local_dir' in self.config:
+            kwargs['local_dir'] = self.config['local_dir']
+
+        self.c_node = CNode(kwargs)
 
     def get_list_of_files(self):
         """
@@ -80,11 +100,13 @@ class Dataset(object):
         dirs = []
         for f in file_lines:
             item = f.split(' ')
-            if len(item) > 1:  # TODO for the time being it does not do directories
+            if len(item) > 1:
                 is_dir = item[0][0] == 'd'
                 if item[-1][0] == '.':
                     pass
                 elif is_dir:
+                    if self.config['include_subdirs']:
+                        self.children.append(Dataset(os.path.join(self.dataset, item[-1])))
                     dirs.append(item[-1])
                 else:
                     files.append(item[-1])
@@ -104,30 +126,74 @@ class Dataset(object):
         print(files)
         print(dirs)
 
-        self.files = files
+        self.all_files = files
         self.dirs = dirs
 
-    # noinspection PyMethodMayBeStatic
-    def make_local_copy(self):
+    def make_local_copy(self, extensions=None):
         """
         make local copy on disk of the entire dataset
         :return:
-        success or fail
+        None, it raises if there is an error
         """
-        pass  # TODO make_local_copy
 
-    def make_file_hashes(self):
+        if not self.c_node:
+            self.assign_cnode()
+
+        loc_dir = self.c_node.create_temp_directory(dataset=self.source_dir)
+
+        command = [self.config['rsync_command'], self.config['rsync_sync_opts']]
+        if not extensions:
+            command.append(self.source_location)
+            command.append(loc_dir)
+            p = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            out, err = p.communicate()
+            if err:
+                raise RuntimeError('Rsync failed: ' + err.decode('utf-8'))
+        else:
+            for e in extensions:
+                cmd = command.copy()
+                cmd.append(os.path.join(self.source_location, '*.' + e))
+                cmd.append(loc_dir)
+                p = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                out, err = p.communicate()
+                if err:
+                    raise RuntimeError('Rsync failed: ' + err.decode('utf-8'))
+
+        self.has_local_copy = True
+
+    def _make_file_hashes(self):
         """
         make hashes of files that are present in the dataset at the moment
         :return:
         """
-        pass  # TODO make_file_hashes
+        hashes = {}
+        if not self.has_local_copy:
+            warnings.warn("make_file_hashes: there's no local directory")
+        loc_dir = self.c_node.directory
+        files = [os.path.join(loc_dir, f) for f in os.listdir(loc_dir)
+                 if os.path.isfile(os.path.join(loc_dir, f))]
+        for fn in files:
+            hasher = hashlib.md5()
+            with open(fn, "rb") as f:
+                for chunk in iter(lambda: f.read(4096), b""):
+                    hasher.update(chunk)
+            hashes[f] = hasher.hexdigest()
+        return hashes
+
+    def create_file_hashes(self):
+        self.hashes = self._make_file_hashes()
 
     def check_file_hashes(self):
         """
-        checks
-        :return:
+        checks file hashes
+        :return: True if check succeeds False if it doesn't (and issues warning)
         """
+        h = self._make_file_hashes()
+        for (k, v) in iter(self.hashes.items()):
+            if v != h[k]:
+                warnings.warn("hashes not confirmed for file " + k)
+                return False
+        return True
 
     def resync_to_source(self, cleanup=True):
         """
@@ -135,7 +201,15 @@ class Dataset(object):
         :param cleanup: if True, removes the local copy on server
         :return:
         """
-        pass  # TODO resync to source
+        command = [self.config['rsync_command'], self.config['rsync_sync_opts'], self.c_node.directory,
+                   self.source_location]
+        p = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        out, err = p.communicate()
+        if err:
+            raise RuntimeError('Rsync failed: ' + err.decode('utf-8'))
+
+        if cleanup:
+            self.c_node.wipe_temp_directory()
 
 
 class Probe:
@@ -144,6 +218,12 @@ class Probe:
 
 class CNode(object):
     def __init__(self, **kwargs):
+        """
+
+        :param kwargs: dir_pattern: how to get the base dir (from host name etc.)
+                       local_dir: specifying the local dir directly (alternative to dir_pattern)
+        :return:
+        """
         self.name = socket.gethostname()
         self.config = cfg.copy()
         # read user defaults file
@@ -158,11 +238,19 @@ class CNode(object):
             self.directory = self.base_dir
 
     def create_temp_directory(self, dataset=None):
+        root_dir = self.base_dir
+
+        temp_dir = tempfile.mkdtemp(dir=root_dir)
         if dataset:
-            root_dir = os.path.join(self.base_dir, dataset)
+            self.directory = os.path.join(temp_dir, dataset)
+            os.mkdir(self.directory)
         else:
-            root_dir = self.base_dir
-        self.directory = tempfile.mkdtemp(dir=root_dir)
+            self.directory = temp_dir
+
+        if self.directory[-1] != '/':
+            self.directory += '/'
+
+        return self.directory
 
     def wipe_temp_directory(self):
         shutil.rmtree(self.directory)
