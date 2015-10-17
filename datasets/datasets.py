@@ -7,6 +7,8 @@ import tempfile
 import shutil
 import warnings
 import hashlib
+import logging
+
 from collections import defaultdict
 from .datasets_conf_defaults import cfg
 
@@ -77,7 +79,7 @@ class Dataset(object):
         if 'local_dir' in self.config:
             kwargs['local_dir'] = self.config['local_dir']
 
-        self.c_node = CNode(kwargs)
+        self.c_node = CNode(**kwargs)
 
     def get_list_of_files(self):
         """
@@ -87,7 +89,7 @@ class Dataset(object):
         """
         command = [self.config['rsync_cmd'], self.config['rsync_list_opts'], self.source_location]
 
-        print(' '.join(command))
+        logging.debug('rsync command: ' + ' '.join(command))
 
         p = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         out, err = p.communicate()
@@ -105,8 +107,9 @@ class Dataset(object):
                 if item[-1][0] == '.':
                     pass
                 elif is_dir:
-                    if self.config['include_subdirs']:
-                        self.children.append(Dataset(os.path.join(self.dataset, item[-1])))
+                    if self.config['subdirs_as_datasets']:
+                        self.children.append(Dataset(os.path.join(self.dataset, item[-1]),
+                                                     **self.config))
                     dirs.append(item[-1])
                 else:
                     files.append(item[-1])
@@ -123,8 +126,8 @@ class Dataset(object):
 
         files.sort(key=extension_key)
 
-        print(files)
-        print(dirs)
+        logging.debug("files found: " + str(files))
+        logging.debug("dirs found: " + str(dirs))
 
         self.all_files = files
         self.dirs = dirs
@@ -139,27 +142,40 @@ class Dataset(object):
         if not self.c_node:
             self.assign_cnode()
 
-        loc_dir = self.c_node.create_temp_directory(dataset=self.source_dir)
+        loc_dir = self.c_node.create_temp_directory(dataset=self.dataset)
 
-        command = [self.config['rsync_command'], self.config['rsync_sync_opts']]
-        if not extensions:
+        command = [self.config['rsync_cmd'], self.config['rsync_sync_opts']]
+        if extensions:
+            for e in extensions:
+                cmd = command.copy()
+                cmd.append(os.path.join(self.source_location, '*.' + e))
+                cmd.append(loc_dir)
+                p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                out, err = p.communicate()
+                if err:
+                    raise RuntimeError('Rsync failed: ' + err.decode('utf-8'))
+        elif self.config['subdirs_as_datasets']:  # don't copy subdirs
+            for f in self.all_files:
+                cmd = command.copy()
+                cmd.append(os.path.join(self.source_location, f))
+                cmd.append(loc_dir)
+                logging.debug("rsync command: " + ' '.join(cmd))
+                p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                out, err = p.communicate()
+                if err:
+                    raise RuntimeError('Rsync failed: ' + err.decode('utf-8'))
+                logging.debug("rsync out: " + out.decode('utf-8'))
+
+        else:
             command.append(self.source_location)
             command.append(loc_dir)
             p = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             out, err = p.communicate()
             if err:
                 raise RuntimeError('Rsync failed: ' + err.decode('utf-8'))
-        else:
-            for e in extensions:
-                cmd = command.copy()
-                cmd.append(os.path.join(self.source_location, '*.' + e))
-                cmd.append(loc_dir)
-                p = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                out, err = p.communicate()
-                if err:
-                    raise RuntimeError('Rsync failed: ' + err.decode('utf-8'))
 
         self.has_local_copy = True
+        return loc_dir
 
     def _make_file_hashes(self):
         """
@@ -170,14 +186,13 @@ class Dataset(object):
         if not self.has_local_copy:
             warnings.warn("make_file_hashes: there's no local directory")
         loc_dir = self.c_node.directory
-        files = [os.path.join(loc_dir, f) for f in os.listdir(loc_dir)
-                 if os.path.isfile(os.path.join(loc_dir, f))]
-        for fn in files:
-            hasher = hashlib.md5()
-            with open(fn, "rb") as f:
-                for chunk in iter(lambda: f.read(4096), b""):
-                    hasher.update(chunk)
-            hashes[f] = hasher.hexdigest()
+        for root, dirs, files in os.walk(loc_dir):
+            for fn in files:
+                hasher = hashlib.md5()
+                with open(os.path.join(root, fn), "rb") as f:
+                    for chunk in iter(lambda: f.read(4096), b""):
+                        hasher.update(chunk)
+                hashes[os.path.relpath(os.path.join(root, fn), start=loc_dir)] = hasher.hexdigest()
         return hashes
 
     def create_file_hashes(self):
@@ -233,9 +248,9 @@ class CNode(object):
         if 'dir_pattern' in self.config:
             self.base_dir = self.config['dir_pattern'].replace('%HOST', self.name)
         elif 'local_dir' in self.config:
-            self.directory = self.config['local_dir']
+            self.base_dir = self.config['local_dir']
         else:
-            self.directory = self.base_dir
+            raise ValueError('base_dir not specified')
 
     def create_temp_directory(self, dataset=None):
         root_dir = self.base_dir
@@ -243,6 +258,9 @@ class CNode(object):
         temp_dir = tempfile.mkdtemp(dir=root_dir)
         if dataset:
             self.directory = os.path.join(temp_dir, dataset)
+            logging.debug("the temp dir is: " + temp_dir)
+            logging.debug("the dataset is: " + dataset)
+            logging.debug("the directory is: " + self.directory)
             os.mkdir(self.directory)
         else:
             self.directory = temp_dir
